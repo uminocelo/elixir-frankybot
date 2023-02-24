@@ -1,6 +1,5 @@
 defmodule Spiders.MangayabuSpider do
-  # to run Crawly.Engine.start_spider(Spiders.MangayabuSpider)
-
+  # to run iex -S mix run -e "Crawly.Engine.start_spider(Spiders.MangayabuSpider)"
   use Crawly.Spider
 
   @impl Crawly.Spider
@@ -15,8 +14,6 @@ defmodule Spiders.MangayabuSpider do
 
   @impl Crawly.Spider
   def parse_item(response) do
-    IO.inspect(response.request_url)
-
     case get_manga_info(response.body) do
       %{"allposts" => chapters} ->
         {:ok, _} = save_on_directory(chapters)
@@ -25,14 +22,36 @@ defmodule Spiders.MangayabuSpider do
           :items => [],
           :requests => chapters |> get_all_urls_from_json() |> create_requests_from_list(response.request_url)
         }
-      %{"chapter_name" => _, "chapter_number" => _} ->
-        # section table-of-contents
+      %{"chapter_name" => _, "chapter_number" => num} ->
+        {:ok, chapter_dir_path} = create_dir(num)
+        get_and_save_pages(response.body, chapter_dir_path)
 
         %Crawly.ParsedItem{
           :items => [],
           :requests => []
         }
     end
+  end
+
+  @spec create_dir(any()) :: {:ok, any()} | {:error, any()}
+  def create_dir(num) do
+    one_piece_dir = Path.absname("library/onepiece")
+    chapters_dir_path = one_piece_dir <> "/chapters"
+    with :ok <- File.mkdir_p(chapters_dir_path),
+          :ok = File.mkdir_p(chapters_dir_path <> "/#{num}") do
+      {:ok, chapters_dir_path <> "/#{num}"}
+    end
+  end
+
+  def get_and_save_pages(body, dir_path) do
+    {:ok, document} = Floki.parse_document(body)
+    pages = Floki.find(document, ".hide-after-a-while ~ img")
+    Enum.each(pages, fn page ->
+      page_src = Floki.attribute(page, "src") |> List.first()
+      page_id = Floki.attribute(page, "id") |> List.first()
+      {:ok, response} = HTTPoison.get(page_src)
+      File.write(dir_path <> "/#{page_id}.jpg", response.body)
+    end)
   end
 
   def get_all_urls_from_json([%{"chapters" => _, "num" => _} | _] = data) do
@@ -54,12 +73,12 @@ defmodule Spiders.MangayabuSpider do
 
   def save_on_directory(data) do
     library = Path.absname("library")
-    path = Path.join(library, "onepiece") |> IO.inspect()
+    path = Path.join(library, "onepiece")
 
     :ok = File.mkdir_p(path)
 
-    path = path <> "/chapters.json" |> IO.inspect()
-    File.write(path, Jason.encode!(data)) |> IO.inspect()
+    path = path <> "/chapters.json"
+    File.write(path, Jason.encode!(data))
 
     {:ok, path}
 
@@ -76,5 +95,36 @@ defmodule Spiders.MangayabuSpider do
 
   def build_absolute_url(url, request_url) do
     URI.merge(request_url, url) |> to_string()
+  end
+
+  # {
+  #   "chapters": [
+  #     {
+  #       "date": "24/04/19",
+  #       "id": "https://mangayabu.top/ler/one-piece-capitulo-01-my3414/",
+  #       "scan": "",
+  #       "scanuri": ""
+  #     }
+  #   ],
+  #   "num": "01"
+  # }
+  def validating_chapters do
+    one_piece_dir = Path.absname("library/onepiece/chapters")
+    one_piece_chapter_list = Path.absname("library/onepiece/chapters.json")
+    {:ok, chapters_list_data} = File.read(one_piece_chapter_list)
+    {:ok, chapters_folders} = File.ls(one_piece_dir)
+    {:ok, chapter_list} = Jason.decode(chapters_list_data)
+
+    chapter_list
+    |> Enum.reverse()
+    |> Enum.each(fn chapter ->
+      if Enum.find(chapters_folders, fn folder_name -> folder_name == chapter["num"] end) do
+        IO.inspect(chapter["num"], label: "IS_FOLDER")
+      else
+        %{"chapters" => [chapter_info], "num" => _} = chapter
+        IO.inspect(chapter["num"], label: "!IS_FOLDER")
+        Crawly.fetch(chapter_info["id"], with: Spiders.MangayabuSpider)
+      end
+    end)
   end
 end
